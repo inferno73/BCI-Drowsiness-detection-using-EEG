@@ -1,190 +1,145 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.signal import butter, iirnotch, filtfilt, medfilt
+from scipy.signal import iirnotch, filtfilt
+from scipy.fft import fft
 import pywt
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, Dropout, Conv1D, MaxPooling1D, Flatten
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
+# Load the data
+def load_data(file_path):
+    data = pd.read_csv(file_path)
+    return data
 
-def load_eeg_data(filepath, header='infer', column_names=None):
-    try:
-        # Učitamo CSV fajl u DataFrame
-        eeg_data = pd.read_csv(filepath, header=header)
-
-        # Ako je zaglavlje None, postavimo imena kolona
-        if header is None and column_names is not None:
-            eeg_data.columns = column_names
-
-        return eeg_data
-    except Exception as e:
-        print("Došlo je do greške prilikom učitavanja fajla: {e}")
-        return None
-
-
-def plot_eeg(data, channels=None, start=0, end=None, sampling_rate=1, title='EEG Signal'):
-    """
-    Funkcija za plotanje EEG signala.
-
-    :param data: DataFrame sa EEG podacima.
-    :param channels: Lista kanala za plotanje. Ako je None, plotaju se svi kanali.
-    :param start: Početni uzorak za plotanje.
-    :param end: Krajnji uzorak za plotanje. Ako je None, plotaju se svi uzorci do kraja.
-    :param sampling_rate: Frekvencija uzorkovanja u Hz (koristi se za kreiranje vremenske ose).
-    :param title: Naslov grafa.
-    """
-    if channels is None:
-        channels = data.columns
-
-    if end is None:
-        end = len(data)
-
-    # Kreiranje vremenske ose
-    time = (start + np.arange(end - start)) / sampling_rate
-
-    plt.figure(figsize=(15, 8))
-    for channel in channels:
-        plt.plot(time, data[channel].iloc[start:end], label=channel)
-
-    plt.xlabel('Time (s)')
-    plt.ylabel('Amplitude')
-    plt.title(title)
-    plt.legend()
-    plt.show()
-
-
+# Apply Notch filter to remove power line noise
 def notch_filter(data, freq, fs, quality_factor=30):
-    """
-    Primena Notch filtera na EEG podatke.
-
-    :param data: EEG podaci (DataFrame).
-    :param freq: Frekvencija koja se uklanja (Hz).
-    :param fs: Frekvencija uzorkovanja (Hz).
-    :param quality_factor: Kvalitet filtera.
-    :return: Filtrirani podaci (DataFrame).
-    """
     nyq = 0.5 * fs
     freq = freq / nyq
     b, a = iirnotch(freq, quality_factor)
-    filtered_data = data.apply(lambda x: filtfilt(b, a, x), axis=0)
+    filtered_data = filtfilt(b, a, data, axis=0)
     return filtered_data
 
+# Extract more statistical features
+def extract_statistical_features(data):
+    mean = np.mean(data, axis=1)
+    std = np.std(data, axis=1)
+    min_val = np.min(data, axis=1)
+    max_val = np.max(data, axis=1)
+    median = np.median(data, axis=1)
+    q25 = np.percentile(data, 25, axis=1)
+    q75 = np.percentile(data, 75, axis=1)
+    iqr = q75 - q25
+    skewness = np.apply_along_axis(lambda x: pd.Series(x).skew(), 1, data)
+    kurtosis = np.apply_along_axis(lambda x: pd.Series(x).kurt(), 1, data)
+    features = np.vstack((mean, std, min_val, max_val, median, q25, q75, iqr, skewness, kurtosis)).T
+    return features
 
-def fourier_transform(data, fs):
-    freqs = np.fft.fftfreq(len(data), 1/fs)
-    fft_values = np.fft.fft(data)
-    return freqs, np.abs(fft_values)
-
-
+# Apply Wavelet Transform
 def wavelet_transform(data, wavelet='db5', level=4):
-    """
-    Primjena Wavelet transformacije na EEG podatke.
+    coeffs = [pywt.wavedec(d, wavelet, level=level) for d in data]
+    features = np.array([np.concatenate(c) for c in coeffs])
+    return features
 
-    :param data: EEG podaci (DataFrame).
-    :param wavelet: Tip wavelet-a (npr. 'db4').
-    :param level: Broj nivoa dekompozicije.
-    :return: Koeficijenti wavelet transformacije.
-    """
-    coeffs = {}
-    for column in data.columns:
-        coeffs[column] = pywt.wavedec(data[column], wavelet, level=level)
-    return coeffs
+# Apply Fourier Transform
+def fourier_transform(data):
+    fft_features = np.abs(fft(data, axis=1))
+    return fft_features
 
+# Preprocess the data
+def preprocess_data(data, fs=250):
+    # Drop rows with any NaN values
+    data = data.dropna()
 
-def plot_wavelet_coeffs(coeffs, channels, sampling_rate=1, title='Wavelet Coefficients'):
-    """
-    Funkcija za plotanje wavelet koeficijenata.
+    # Extract labels
+    y = data['eyeDetection'].values
 
-    :param coeffs: Koeficijenti wavelet transformacije.
-    :param channels: Lista kanala za plotanje.
-    :param sampling_rate: Frekvencija uzorkovanja u Hz (koristi se za kreiranje vremenske ose).
-    :param title: Naslov grafa.
-    """
-    num_levels = len(next(iter(coeffs.values())))
+    # Apply Notch filter to remove power line noise at 50Hz
+    filtered_data = notch_filter(data.drop(columns=['eyeDetection']).values, 50, fs)
 
-    plt.figure(figsize=(15, 8))
-    for channel in channels:
-        plt.subplot(len(channels), 1, channels.index(channel) + 1)
-        for i, coef in enumerate(coeffs[channel]):
-            plt.plot(coef, label=f'Level {i + 1}')
-        plt.xlabel('Samples')
-        plt.ylabel('Amplitude')
-        plt.title(f'{title} - {channel}')
-        plt.legend()
+    # Extract statistical features
+    statistical_features = extract_statistical_features(filtered_data)
 
-    plt.tight_layout()
-    plt.show()
+    # Apply Wavelet Transform
+    wavelet_features = wavelet_transform(filtered_data)
 
+    # Apply Fourier Transform
+    fourier_features = fourier_transform(filtered_data)
 
-def butter_bandpass(lowcut, highcut, fs, order=4):
-    """
-    Kreira band-pass Butterworth filter.
+    # Combine all features
+    X = np.hstack((statistical_features, wavelet_features, fourier_features))
 
-    :param lowcut: Donja frekvencijska granica (Hz).
-    :param highcut: Gornja frekvencijska granica (Hz).
-    :param fs: Frekvencija uzorkovanja (Hz).
-    :param order: Red filtra.
-    :return: Koeficijenti filtra.
-    """
-    nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = butter(order, [low, high], btype='band')
-    return b, a
+    # Standardize the features
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
 
+    return X, y
 
-def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
-    """
-    Primjena band-pass Butterworth filtera na EEG podatke.
-
-    :param data: EEG podaci (DataFrame).
-    :param lowcut: Donja frekvencijska granica (Hz).
-    :param highcut: Gornja frekvencijska granica (Hz).
-    :param fs: Frekvencija uzorkovanja (Hz).
-    :param order: Red filtra.
-    :return: Filtrirani podaci (DataFrame).
-    """
-    b, a = butter_bandpass(lowcut, highcut, fs, order=order)
-    filtered_data = data.apply(lambda x: filtfilt(b, a, x), axis=0)
-    return filtered_data
-
-
-def butter_lowpass(cutoff, fs, order=4):
-    nyq = 0.5 * fs
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='low', analog=False)
-    return b, a
-
-
-def butter_lowpass_filter(data, cutoff, fs, order=4):
-    b, a = butter_lowpass(cutoff, fs, order=order)
-    y = filtfilt(b, a, data)
-    return y
-
-
-def apply_median_filter(data, kernel_size=3):
-    return data.apply(lambda x: medfilt(x, kernel_size), axis=0)
-
+# Create and compile the CNN model
+def create_cnn_model(input_shape):
+    model = Sequential()
+    model.add(Conv1D(64, kernel_size=3, activation='relu', padding='same', input_shape=input_shape))
+    model.add(MaxPooling1D(pool_size=2, strides=1, padding='same'))
+    model.add(Dropout(0.3))
+    model.add(Conv1D(128, kernel_size=3, activation='relu', padding='same'))
+    model.add(MaxPooling1D(pool_size=2, strides=1, padding='same'))
+    model.add(Dropout(0.3))
+    model.add(Conv1D(256, kernel_size=3, activation='relu', padding='same'))
+    model.add(MaxPooling1D(pool_size=2, strides=1, padding='same'))
+    model.add(Dropout(0.4))
+    model.add(Flatten())
+    model.add(Dense(512, activation='relu'))
+    model.add(Dropout(0.5))
+    model.add(Dense(1, activation='sigmoid'))
+    optimizer = Adam(learning_rate=0.001)
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+    return model
 
 def main():
-    file_path = 'test.csv'
-    eeg_data = load_eeg_data(file_path)
-    filtered_data = butter_bandpass_filter(eeg_data, 0.5, 30, 250)
-    median_filtered = apply_median_filter(eeg_data)
-    wavelet_coeffs = wavelet_transform(eeg_data, wavelet='db5', level=4)
-    cutoff = 30.0  # Frekvencija odsecanja
-    lowpassed_data = eeg_data.apply(lambda x: butter_lowpass_filter(x, cutoff, 250), axis=0)
+    # Load and preprocess the data
+    data = load_data('EEG_Eye_State_Classification.csv')  # Replace with your file path
+    fs = 250  # Example sampling rate, replace with your actual sampling rate
+    X, y = preprocess_data(data, fs)
 
-    if eeg_data is not None:
-        print(eeg_data.head())
-        print(wavelet_coeffs)
-        eeg_data = load_eeg_data(file_path)
+    # Reshape data for CNN
+    X = X.reshape((X.shape[0], X.shape[1], 1))
 
-    if eeg_data is not None:
-        plot_eeg(eeg_data, channels=None, start=0, end=1000, sampling_rate=250, title='Originalni EEG signal')
-        plot_wavelet_coeffs(wavelet_coeffs, channels=['AF4'], sampling_rate=250)
-        plot_eeg(filtered_data, channels=None, start=0, end=1000, sampling_rate=250, title='Butterworth EEG signal')
-        plot_eeg(median_filtered, channels=None, start=0, end=1000, sampling_rate=250,title='Median filter')
-        plot_eeg(lowpassed_data,channels=None,start=0,end=1000,sampling_rate=250,title='Lowpass')
+    # Initialize KFold cross-validation
+    kfold = KFold(n_splits=5, shuffle=True, random_state=42)
+    accuracies = []
 
+    for train_index, test_index in kfold.split(X):
+        X_train, X_test = X[train_index], X[test_index]
+        y_train, y_test = y[train_index], y[test_index]
 
-if main is not None:
+        # Create and train the model
+        model = create_cnn_model(X_train.shape[1:])
+
+        # Use EarlyStopping and ReduceLROnPlateau to improve training
+        early_stopping = EarlyStopping(monitor='val_accuracy', patience=10, restore_best_weights=True, mode='max', min_delta=0.01)
+        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
+
+        history = model.fit(X_train, y_train, epochs=100, batch_size=32, validation_data=(X_test, y_test),
+                            callbacks=[early_stopping, reduce_lr])
+
+        # Evaluate the model
+        loss, accuracy = model.evaluate(X_test, y_test)
+        accuracies.append(accuracy)
+        print(f"Fold Accuracy: {accuracy}")
+
+    print(f"Mean Cross-Validation Accuracy: {np.mean(accuracies)}")
+
+    # Plot the accuracy
+    plt.plot(history.history['accuracy'], label='train accuracy')
+    plt.plot(history.history['val_accuracy'], label='val accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.show()
+
+if __name__ == "__main__":
     main()
