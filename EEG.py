@@ -6,7 +6,6 @@ import pywt
 from tensorflow.keras import Sequential
 from tensorflow.keras.layers import Dense, Dropout, Conv1D, MaxPooling1D, Flatten
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.model_selection import train_test_split, KFold
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
@@ -99,6 +98,13 @@ def create_cnn_model(input_shape):
     model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
     return model
 
+# Custom early stopping function
+def custom_early_stopping(history, threshold=0.94):
+    accuracies = history.history['accuracy']
+    if any(acc >= threshold for acc in accuracies):
+        return True
+    return False
+
 def main():
     # Load and preprocess the data
     data = load_data('EEG_Eye_State_Classification.csv')  # Replace with your file path
@@ -119,12 +125,11 @@ def main():
         # Create and train the model
         model = create_cnn_model(X_train.shape[1:])
 
-        # Use EarlyStopping and ReduceLROnPlateau to improve training
-        early_stopping = EarlyStopping(monitor='val_accuracy', patience=10, restore_best_weights=True, mode='max', min_delta=0.01)
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
-
-        history = model.fit(X_train, y_train, epochs=100, batch_size=32, validation_data=(X_test, y_test),
-                            callbacks=[early_stopping, reduce_lr])
+        for epoch in range(100):  # Manually iterate over epochs
+            history = model.fit(X_train, y_train, epochs=1, batch_size=32, validation_data=(X_test, y_test))
+            if custom_early_stopping(history, threshold=0.94):
+                print(f"Early stopping at epoch {epoch+1}")
+                break
 
         # Evaluate the model
         loss, accuracy = model.evaluate(X_test, y_test)
